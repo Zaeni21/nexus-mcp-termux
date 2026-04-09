@@ -12,32 +12,38 @@ Auto setup & run [nexus-xyz/mcp-nexus-server](https://github.com/nexus-xyz/mcp-n
 | Explorer | `https://nexus.testnet.blockscout.com` |
 | Currency | NEX |
 
-## Requirements
-
-- Android device with [Termux](https://termux.dev)
-- [Commonstack API key](https://commonstack.ai) (LLM gateway)
-- Optional: testnet wallet private key
-
 ---
 
-## Quick Start
+## Installation
 
-### 1. In Termux
+### Step 1 — Termux
+
 ```bash
+pkg install git
+
+git clone https://github.com/Zaeni21/nexus-mcp-termux.git
+
+cd nexus-mcp-termux
+
+ls
+
 bash termux-bootstrap.sh
 ```
 
-### 2. Login Ubuntu
+### Step 2 — Login Ubuntu
+
 ```bash
 proot-distro login ubuntu
 ```
 
-### 3. Run setup (inside Ubuntu)
+### Step 3 — Run setup (inside Ubuntu)
+
 ```bash
 bash ~/nexus-mcp-setup.sh
 ```
 
-### 4. Start server (inside Ubuntu)
+### Step 4 — Start server (inside Ubuntu)
+
 ```bash
 ~/start-nexus-mcp.sh          # production
 ~/start-nexus-mcp.sh dev      # hot reload
