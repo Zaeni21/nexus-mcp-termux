@@ -1,0 +1,270 @@
+#!/bin/bash
+# ============================================================
+#  nexus-mcp-setup.sh
+#  Repo  : https://github.com/nexus-xyz/mcp-nexus-server
+#  Stack : Next.js 15 + @vercel/mcp-adapter + Redis + pnpm
+#  API   : https://api.commonstack.ai/v1 (commonstack.ai)
+#  Chain : Nexus Testnet (Chain ID 3945)
+#  RPC   : https://testnet.rpc.nexus.xyz
+#  Exp   : https://nexus.testnet.blockscout.com
+#  Env   : proot-distro Ubuntu (Termux)
+# ============================================================
+
+set -e
+
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
+BLUE='\033[0;34m'; CYAN='\033[0;36m'; BOLD='\033[1m'; RESET='\033[0m'
+
+REPO_URL="https://github.com/nexus-xyz/mcp-nexus-server"
+INSTALL_DIR="$HOME/mcp-nexus-server"
+ENV_FILE="$INSTALL_DIR/.env.local"
+CONFIG_SAVE="$HOME/.nexus-mcp.conf"
+NEXUS_RPC="https://testnet.rpc.nexus.xyz"
+NEXUS_EXPLORER="https://nexus.testnet.blockscout.com"
+CHAIN_ID="3945"
+COMMONSTACK_URL="https://api.commonstack.ai/v1"
+PORT=3000
+
+log()   { echo -e "${GREEN}[✓]${RESET} $1"; }
+info()  { echo -e "${BLUE}[i]${RESET} $1"; }
+warn()  { echo -e "${YELLOW}[!]${RESET} $1"; }
+err()   { echo -e "${RED}[✗]${RESET} $1"; }
+step()  { echo -e "\n${BOLD}${CYAN}── $1${RESET}"; }
+
+# ── Banner ───────────────────────────────────────────────────
+echo -e "${CYAN}${BOLD}"
+cat << 'EOF'
+  ███╗   ██╗███████╗██╗  ██╗██╗   ██╗███████╗
+  ████╗  ██║██╔════╝╚██╗██╔╝██║   ██║██╔════╝
+  ██╔██╗ ██║█████╗   ╚███╔╝ ██║   ██║███████╗
+  ██║╚██╗██║██╔══╝   ██╔██╗ ██║   ██║╚════██║
+  ██║ ╚████║███████╗██╔╝ ██╗╚██████╔╝███████║
+  ╚═╝  ╚═══╝╚══════╝╚═╝  ╚═╝ ╚═════╝ ╚══════╝
+EOF
+echo -e "${RESET}"
+echo -e "  ${BOLD}nexus-xyz/mcp-nexus-server — Termux Ubuntu Setup${RESET}"
+echo -e "  ${BLUE}Next.js 15 · pnpm · Redis · Commonstack API${RESET}"
+echo -e "  ${BLUE}RPC: ${NEXUS_RPC}${RESET}"
+echo -e "  ${BLUE}Explorer: ${NEXUS_EXPLORER}${RESET}\n"
+
+# ── 0. Must be inside Ubuntu ─────────────────────────────────
+if [ ! -f /etc/debian_version ] && [ ! -f /etc/lsb-release ]; then
+  err "Run this inside Ubuntu: proot-distro login ubuntu"
+  exit 1
+fi
+log "Ubuntu detected (proot-distro)"
+
+# ── 1. System packages ───────────────────────────────────────
+step "System packages"
+apt-get update -qq 2>/dev/null | tail -1
+apt-get install -y -qq curl git redis-server build-essential 2>/dev/null \
+  | grep -E "Setting up|already" | head -10 || true
+log "curl git redis build-essential ready"
+
+# ── 2. Node.js 20 LTS ───────────────────────────────────────
+step "Node.js 20 LTS"
+if ! node --version 2>/dev/null | grep -q "v20"; then
+  info "Installing Node.js 20..."
+  curl -fsSL https://deb.nodesource.com/setup_20.x | bash - 2>/dev/null
+  apt-get install -y -qq nodejs 2>/dev/null | grep "Setting up nodejs" || true
+fi
+log "Node $(node -v)"
+
+# ── 3. pnpm ──────────────────────────────────────────────────
+step "pnpm (required by repo)"
+if ! command -v pnpm &>/dev/null; then
+  npm install -g pnpm --silent 2>/dev/null
+fi
+log "pnpm $(pnpm -v)"
+
+# ── 4. Commonstack API key ───────────────────────────────────
+step "Commonstack API key"
+info "Get your key at: ${BOLD}https://commonstack.ai${RESET}"
+info "One key → Claude, GPT-4, Gemini, DeepSeek, etc."
+echo ""
+
+COMMONSTACK_API_KEY=""
+if [ -f "$CONFIG_SAVE" ]; then
+  source "$CONFIG_SAVE" 2>/dev/null || true
+  if [ -n "$COMMONSTACK_API_KEY" ]; then
+    info "Saved key: ${COMMONSTACK_API_KEY:0:10}..."
+    read -p "  Use saved key? [Y/n]: " USE_SAVED
+    [[ "${USE_SAVED:-Y}" =~ ^[Nn]$ ]] && COMMONSTACK_API_KEY=""
+  fi
+fi
+
+if [ -z "$COMMONSTACK_API_KEY" ]; then
+  while true; do
+    read -sp "  Enter Commonstack API key: " COMMONSTACK_API_KEY; echo
+    [ ${#COMMONSTACK_API_KEY} -ge 16 ] && break
+    warn "Key too short, try again"
+  done
+  echo "COMMONSTACK_API_KEY=$COMMONSTACK_API_KEY" > "$CONFIG_SAVE"
+  chmod 600 "$CONFIG_SAVE"
+  log "Key saved to $CONFIG_SAVE"
+fi
+
+# ── 5. Wallet key (optional) ─────────────────────────────────
+step "Wallet private key (optional)"
+warn "Testnet only — NEVER use a real-funds wallet!"
+read -sp "  Private key (0x...) or Enter to skip: " PRIVATE_KEY; echo
+if [ -z "$PRIVATE_KEY" ]; then
+  PRIVATE_KEY="0x0000000000000000000000000000000000000000000000000000000000000001"
+  warn "No wallet set — sendRawTransaction will be non-functional"
+else
+  log "Wallet configured"
+fi
+
+# ── 6. Clone repo ────────────────────────────────────────────
+step "Cloning nexus-xyz/mcp-nexus-server"
+if [ -d "$INSTALL_DIR/.git" ]; then
+  warn "$INSTALL_DIR already exists"
+  read -p "  Pull latest updates? [Y/n]: " DO_PULL
+  if [[ "${DO_PULL:-Y}" =~ ^[Yy]$ ]]; then
+    git -C "$INSTALL_DIR" pull 2>&1 | tail -2
+    log "Repo updated"
+  else
+    log "Using existing clone"
+  fi
+else
+  git clone --depth 1 "$REPO_URL" "$INSTALL_DIR" 2>&1 | grep -E "Cloning|done\."
+  log "Cloned to $INSTALL_DIR"
+fi
+
+# ── 7. Write .env.local ──────────────────────────────────────
+step "Writing .env.local"
+cat > "$ENV_FILE" <<ENVEOF
+# nexus-xyz/mcp-nexus-server — auto-generated by nexus-mcp-setup.sh
+# Generated: $(date)
+
+# ── Nexus Testnet ────────────────────────────────────────────
+NEXUS_RPC_URL=${NEXUS_RPC}
+NEXT_PUBLIC_NEXUS_RPC_URL=${NEXUS_RPC}
+NEXT_PUBLIC_CHAIN_ID=${CHAIN_ID}
+NEXT_PUBLIC_EXPLORER_URL=${NEXUS_EXPLORER}
+
+# ── Wallet (testnet only!) ────────────────────────────────────
+PRIVATE_KEY=${PRIVATE_KEY}
+
+# ── Commonstack LLM Gateway ───────────────────────────────────
+# Routes Anthropic SDK calls through commonstack.ai
+ANTHROPIC_API_KEY=${COMMONSTACK_API_KEY}
+ANTHROPIC_BASE_URL=${COMMONSTACK_URL}
+
+# Also works for OpenAI SDK calls
+OPENAI_API_KEY=${COMMONSTACK_API_KEY}
+OPENAI_BASE_URL=${COMMONSTACK_URL}
+
+# ── Redis (required for @vercel/mcp-adapter SSE transport) ───
+REDIS_URL=redis://127.0.0.1:6379
+
+# ── Next.js ───────────────────────────────────────────────────
+PORT=${PORT}
+NODE_ENV=production
+ENVEOF
+chmod 600 "$ENV_FILE"
+log ".env.local written at $ENV_FILE"
+
+# ── 8. pnpm install ──────────────────────────────────────────
+step "Installing Node.js dependencies (pnpm install)"
+cd "$INSTALL_DIR"
+pnpm install 2>&1 | tail -5
+log "Dependencies installed"
+
+# ── 9. Build Next.js ─────────────────────────────────────────
+step "Building Next.js app (pnpm build)"
+pnpm build 2>&1 | tail -12
+log "Build complete"
+
+# ── 10. Redis ────────────────────────────────────────────────
+step "Starting Redis daemon"
+if ! redis-cli ping 2>/dev/null | grep -q PONG; then
+  redis-server --daemonize yes --logfile /tmp/redis-nexus.log 2>/dev/null
+  sleep 1
+fi
+if redis-cli ping 2>/dev/null | grep -q PONG; then
+  log "Redis running"
+else
+  warn "Redis not responding — SSE transport may not work"
+fi
+
+# ── 11. Run script ───────────────────────────────────────────
+step "Writing ~/start-nexus-mcp.sh"
+cat > "$HOME/start-nexus-mcp.sh" <<RUNEOF
+#!/bin/bash
+# Start nexus-xyz/mcp-nexus-server
+# Usage: ./start-nexus-mcp.sh [dev|start]
+
+INSTALL_DIR="\$HOME/mcp-nexus-server"
+MODE="\${1:-start}"
+
+# ensure Redis is up
+redis-cli ping 2>/dev/null | grep -q PONG || {
+  redis-server --daemonize yes 2>/dev/null
+  sleep 1
+}
+
+if [ ! -f "\$INSTALL_DIR/.env.local" ]; then
+  echo "Run nexus-mcp-setup.sh first!"
+  exit 1
+fi
+
+cd "\$INSTALL_DIR"
+echo ""
+echo "  Nexus MCP Server"
+echo "  Chain ID  : ${CHAIN_ID}"
+echo "  RPC       : ${NEXUS_RPC}"
+echo "  Explorer  : ${NEXUS_EXPLORER}"
+echo "  MCP SSE   : http://localhost:${PORT}/sse"
+echo "  Tools     : getNetworkInfo getBalance getTransaction"
+echo "              getBlock callContract getLogs sendRawTransaction"
+echo ""
+
+case "\$MODE" in
+  dev)
+    echo "  Starting DEV mode (hot reload)..."
+    pnpm dev
+    ;;
+  start|*)
+    echo "  Starting PRODUCTION mode..."
+    pnpm start
+    ;;
+esac
+RUNEOF
+chmod +x "$HOME/start-nexus-mcp.sh"
+log "Run script: ~/start-nexus-mcp.sh"
+
+# ── 12. Claude Desktop config ────────────────────────────────
+cat > "$HOME/.claude_desktop_config.json" <<CFGJSON
+{
+  "mcpServers": {
+    "nexus-blockchain": {
+      "url": "http://localhost:${PORT}/sse",
+      "type": "sse"
+    }
+  }
+}
+CFGJSON
+log "Claude Desktop config: ~/.claude_desktop_config.json"
+
+# ── Done ─────────────────────────────────────────────────────
+echo ""
+echo -e "${BOLD}${GREEN}══════════════════════════════════════════════${RESET}"
+echo -e "${BOLD}${GREEN}  Setup complete!${RESET}"
+echo -e "${BOLD}${GREEN}══════════════════════════════════════════════${RESET}"
+echo ""
+echo -e "  ${BOLD}Start server:${RESET}"
+echo -e "     ${YELLOW}~/start-nexus-mcp.sh${RESET}        # production"
+echo -e "     ${YELLOW}~/start-nexus-mcp.sh dev${RESET}    # hot reload"
+echo ""
+echo -e "  ${BOLD}MCP SSE endpoint:${RESET}"
+echo -e "     ${CYAN}http://localhost:${PORT}/sse${RESET}"
+echo ""
+echo -e "  ${BOLD}Nexus Testnet:${RESET}"
+echo -e "     Chain ID  : ${CYAN}${CHAIN_ID}${RESET}"
+echo -e "     RPC       : ${CYAN}${NEXUS_RPC}${RESET}"
+echo -e "     Explorer  : ${CYAN}${NEXUS_EXPLORER}${RESET}"
+echo ""
+echo -e "  ${BOLD}Commonstack API:${RESET}"
+echo -e "     ${CYAN}${COMMONSTACK_URL}${RESET}"
+echo ""
